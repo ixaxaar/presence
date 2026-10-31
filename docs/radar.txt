@@ -1,0 +1,9 @@
+        . - ' - .
+     .'  N  |      '.      rim: bearing ticks every 10 deg
+    /   .---+---.     \     rings: 2 / 5 / 10 / 20 m
+   |  .'  o |    '.   |     o  = WiFi/BLE blip (green/cyan)
+   +--+-----@-----+---+     *  = closing device (red, with tail)
+   |   '.   | *  .'    |     @  = you
+    \    '--+--'      /      beam sweeps clockwise, 8 s / turn
+     '.     |      .'
+        ' - . - '
