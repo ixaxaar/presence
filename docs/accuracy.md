@@ -17,7 +17,7 @@ bearing needs several nodes or an antenna array.
 
 ## What it can and cannot see
 
-- **Access points / routers:** not shown. Beacons are filtered out.
+- **Access points / routers:** not shown on the dial; listed over serial.
 - **WiFi clients:** only when they transmit on the channel currently being listened
   to. Idle phones transmit rarely, so many are missed.
 - **5 GHz:** invisible. The ESP32-C3 is 2.4 GHz only.
@@ -28,6 +28,11 @@ bearing needs several nodes or an antenna array.
 
 Observed in testing: roughly 1 WiFi packet versus 77 BLE packets in 14 s, so in
 practice this is mostly a BLE presence detector.
+
+## Antenna
+
+Attach the XIAO's external antenna. In testing it improved client RSSI by 4-24 dB
+(e.g. -90 to -69 dBm) and several quiet devices went from rarely to reliably heard.
 
 ## False alerts
 

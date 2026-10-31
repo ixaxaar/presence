@@ -7,21 +7,62 @@
 
 Tracker tracker;
 volatile uint32_t wifiPk = 0, blePk = 0;
+volatile uint8_t lockCh = 0;  // 0 = hop; set over serial with "ch N"
 TFT_eSPI tft;
 TFT_eSprite fb(&tft);
 bool haveFb = false;
 
 // ---------- WiFi sniffing ----------
+volatile uint32_t chSta[15] = {0}, chAp[15] = {0};  // frames heard per channel (diagnostics)
+volatile float chScore[15] = {0};                    // decayed client activity, drives channel choice
+struct Ap { bool used; uint8_t bssid[6]; char ssid[33]; uint8_t ch; int8_t rssi; uint32_t last; };
+Ap aps[16];
+
+static void noteAp(const uint8_t *bssid, const char *ssid, uint8_t len, uint8_t ch, int rssi) {
+  Ap *slot = nullptr;
+  for (auto &a : aps) {
+    if (a.used && !memcmp(a.bssid, bssid, 6)) { slot = &a; break; }
+    if (!slot && !a.used) slot = &a;
+  }
+  if (!slot) {  // table full: replace the stalest
+    slot = &aps[0];
+    for (auto &a : aps) if (a.last < slot->last) slot = &a;
+  }
+  slot->used = true;
+  memcpy(slot->bssid, bssid, 6);
+  if (len) { memcpy(slot->ssid, ssid, len); slot->ssid[len] = 0; }
+  else if (!slot->ssid[0]) strcpy(slot->ssid, "(hidden)");
+  slot->ch = ch; slot->rssi = rssi; slot->last = millis();
+}
+
 static void wifiCb(void *buf, wifi_promiscuous_pkt_type_t type) {
   auto *p = (wifi_promiscuous_pkt_t *)buf;
+  if (p->rx_ctrl.sig_len < 24) return;
   const uint8_t *f = p->payload;
+  uint8_t ch = p->rx_ctrl.channel;
+  if (ch < 1 || ch > 13) return;
   uint8_t t = f[0] & 0x0C, st = f[0] & 0xF0, fl = f[1];
-  const uint8_t *tx = f + 10;  // addr2 = transmitter
+  const uint8_t *tx = f + 10, *bssidField = f + 16;  // addr2 = transmitter, addr3
   if (tx[0] & 0x01) return;    // group address can't be a transmitter
   bool station = false;
-  if (type == WIFI_PKT_MGMT) station = (t == 0x00 && st == 0x40);          // probe request
-  else if (type == WIFI_PKT_DATA) station = (t == 0x08 && (fl & 3) == 1);  // to-DS: from a station
-  if (station) { wifiPk++; tracker.seen(SRC_WIFI, tx, p->rx_ctrl.rssi); }
+  if (type == WIFI_PKT_MGMT) {
+    if (st == 0x80 || st == 0x50) {  // beacon / probe response: an access point
+      chAp[ch]++;
+      if (st == 0x80 && p->rx_ctrl.sig_len >= 38 && f[36] == 0 && f[37] <= 32 && p->rx_ctrl.sig_len >= 38u + f[37])
+        noteAp(tx, (const char *)f + 38, f[37], ch, p->rx_ctrl.rssi);
+      return;
+    }
+    // any other management frame whose sender is not the BSSID comes from a client
+    station = (t == 0x00) && memcmp(tx, bssidField, 6) != 0;
+  } else if (type == WIFI_PKT_DATA) {
+    station = (t == 0x08 && (fl & 3) == 1);  // to-DS, not from-DS: client -> AP
+  }
+  if (station) {
+    wifiPk++;
+    chSta[ch]++;
+    chScore[ch] = chScore[ch] + 1.f;
+    tracker.seen(SRC_WIFI, tx, p->rx_ctrl.rssi);
+  }
 }
 
 // ---------- BLE scanning ----------
@@ -188,12 +229,24 @@ void setup() {
 }
 
 void loop() {
+  if (Serial.available()) {  // "ch N" locks the sniffer to channel N, "ch 0" resumes hopping
+    String l = Serial.readStringUntil('\n');
+    int n;
+    if (sscanf(l.c_str(), "ch %d", &n) == 1 && n >= 0 && n <= 13) { lockCh = n; Serial.printf("lock channel %d\n", n); }
+  }
   static uint32_t lastHop = 0, lastDraw = 0, lastLog = 0;
   static uint8_t ch = 1;
   uint32_t now = millis();
-  if (now - lastHop > 250) {
+  if (now - lastHop >= 140) {
     lastHop = now;
-    ch = ch % 13 + 1;
+    static uint8_t rr = 0, tick = 0;
+    tick++;
+    // survey every channel for 15 s, then give 75% of the airtime to the channel with the most client traffic
+    uint8_t best = 0;
+    for (uint8_t c = 1; c <= 13; c++) if (!best || chSta[c] > chSta[best]) best = c;  // home channel = most client frames overall
+    if (lockCh) ch = lockCh;
+    else if (now > 15000 && (tick & 3) && chSta[best] >= 10) ch = best;  // 75% home, 25% sweep for the rest
+    else { rr = rr % 13 + 1; ch = rr; }
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
   }
   tracker.update();
@@ -211,13 +264,26 @@ void loop() {
     frames++;
     if (now - lastLog > 1000) {
       lastDraw = now;
+      for (int c = 1; c <= 13; c++) chScore[c] = chScore[c] * 0.92f;
+      static uint8_t sec = 0;
+      if (++sec % 5 == 0) {
+        Serial.print("chan sta:");
+        for (int c = 1; c <= 13; c++) if (chSta[c]) Serial.printf(" %d=%u", c, (unsigned)chSta[c]);
+        Serial.print(" | ap:");
+        for (int c = 1; c <= 13; c++) if (chAp[c]) Serial.printf(" %d=%u", c, (unsigned)chAp[c]);
+        Serial.println();
+        for (auto &a : aps)
+          if (a.used && now - a.last < 30000)
+            Serial.printf("AP %-24s ch%-2d rssi=%d %02x:%02x:%02x:%02x:%02x:%02x\n", a.ssid, a.ch, a.rssi,
+                          a.bssid[0], a.bssid[1], a.bssid[2], a.bssid[3], a.bssid[4], a.bssid[5]);
+      }
       lastLog = now;
       Serial.printf("hb wifi_pk=%u ble_pk=%u devs=%d heap=%u fps=%u draw=%ums push=%ums maxgap=%ums\n", (unsigned)wifiPk, (unsigned)blePk, n, ESP.getFreeHeap(), (unsigned)frames, (unsigned)(drawUs/1000), (unsigned)(pushUs/1000), (unsigned)maxGapMs); frames = 0; maxGapMs = 0;
       for (int i = 0; i < n; i++) {
         Dev &d = snap[i];
-        Serial.printf("%s %02x:%02x:%02x:%02x:%02x:%02x rssi=%.0f d=%.1fm slope=%+.2fdB/s v=%+.2fm/s %s%s\n",
+        Serial.printf("%s %02x:%02x:%02x:%02x:%02x:%02x rssi=%.0f n=%u d=%.1fm slope=%+.2fdB/s v=%+.2fm/s %s%s\n",
                       d.src == SRC_BLE ? "BLE " : "WIFI", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5],
-                      d.ema, d.dist, d.slope, d.speed,
+                      d.ema, (unsigned)d.pkts, d.dist, d.slope, d.speed,
                       d.state == ST_CLOSING ? "closing" : d.state == ST_RECEDING ? "receding" : "steady",
                       d.alert ? " ALERT" : "");
       }

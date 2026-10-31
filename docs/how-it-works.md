@@ -4,15 +4,20 @@
 
 Everything runs on the ESP32-C3. The host PC is not involved.
 
-**WiFi (promiscuous mode).** The radio hops across channels 1-13, 250 ms each, and
-receives management and data frames without associating to any network. Only frames
-sent *by stations* are kept:
+**WiFi (promiscuous mode).** The radio receives management and data frames without
+associating to any network. Only frames sent *by stations* are kept:
 
-- probe requests (management subtype 4)
+- management frames whose sender is not the BSSID (probe requests, auth, assoc, action)
 - data frames with the To-DS bit set and From-DS clear
 
 The transmitter address (addr2) and the per-packet RSSI are recorded. Beacons from
-access points are deliberately ignored.
+access points are not tracked as devices; they feed a diagnostic AP table
+(SSID, channel, RSSI) printed over serial.
+
+**Channel hopping.** For the first 15 s every channel 1-13 is visited (140 ms each) to
+find the *home channel*, the one with the most client frames. After that 75% of the
+time is spent on it and 25% sweeping the rest. `ch N` over serial locks to channel N
+(`ch 0` resumes hopping).
 
 **BLE (NimBLE-Arduino).** A continuous passive scan with duplicate reports enabled, so
 every advertisement refreshes that device's RSSI.
