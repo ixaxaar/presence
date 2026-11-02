@@ -6,6 +6,12 @@ device and its rate of change, and draws the result as a radar sweep. Devices wh
 signal is steadily rising are flagged as **closing**, and the rim flashes red when
 one gets close.
 
+![Presence radar running on the round display](docs/media/radar-photo.jpg)
+
+[![Radar sweep demo](docs/media/radar-demo.gif)](docs/media/radar-demo.mp4)
+
+*Click the animation for the full-quality video ([radar-demo.mp4](docs/media/radar-demo.mp4)).*
+
 See [docs/radar.txt](docs/radar.txt) for a sketch of the layout.
 
 ## What you see
